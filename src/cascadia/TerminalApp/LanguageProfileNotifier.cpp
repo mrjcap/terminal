@@ -6,7 +6,7 @@
 
 using namespace winrt::TerminalApp::implementation;
 
-LanguageProfileNotifier::LanguageProfileNotifier(std::function<void()>&& callback) :
+LanguageProfileNotifier::LanguageProfileNotifier(std::function<void(HKL)>&& callback) :
     _callback{ std::move(callback) },
     _currentKeyboardLayout{ GetKeyboardLayout(0) }
 {
@@ -34,7 +34,7 @@ STDMETHODIMP LanguageProfileNotifier::OnActivated(DWORD /*dwProfileType*/, LANGI
         _currentKeyboardLayout = hkl;
         try
         {
-            _callback();
+            _callback(hkl);
         }
         CATCH_RETURN();
     }

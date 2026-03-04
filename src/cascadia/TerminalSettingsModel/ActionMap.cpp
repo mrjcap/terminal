@@ -647,6 +647,69 @@ namespace winrt::Microsoft::Terminal::Settings::Model::implementation
         _AllCommandsCache = single_threaded_vector(std::move(allCommandsVector));
     }
 
+    // Method Description:
+    // - Re-resolve scancode-based keybindings after a keyboard layout change.
+    //   sc(nnn) bindings translate scancode to VK via MapVirtualKeyW at KeyChord
+    //   construction, but the mapping is layout-dependent. This method updates
+    //   stale VK codes without a full settings reload, preserving runtime state
+    //   (font zoom, VT colors, etc.). See GH#11522.
+    // - Must be called on the UI thread. Uses GetKeyboardLayout(0) to query the
+    //   calling thread's active layout, which is guaranteed correct after
+    //   TryEnqueue dispatch (WM_INPUTLANGCHANGE has propagated by then).
+    void ActionMap::NotifyKeyboardLayoutChanged()
+    {
+        const auto layout = GetKeyboardLayout(0);
+        _ResolveScancodeBindings(layout);
+        _NameMapCache = nullptr;
+        _RefreshKeyBindingCaches();
+    }
+
+    void ActionMap::_ResolveScancodeBindings(HKL layout)
+    {
+        std::vector<std::pair<KeyChord, winrt::hstring>> toReinsert;
+        std::vector<KeyChord> toRemove;
+
+        for (const auto& [keys, cmdID] : _KeyMap)
+        {
+            const auto scanCode = keys.ScanCode();
+            if (scanCode != 0)
+            {
+                const auto newVkey = static_cast<int32_t>(MapVirtualKeyExW(scanCode, MAPVK_VSC_TO_VK_EX, layout));
+                if (newVkey == 0)
+                {
+                    // Layout doesn't map this scancode -- keep the existing binding
+                    // rather than making it unmatchable.
+                    continue;
+                }
+                if (newVkey != keys.Vkey())
+                {
+                    toRemove.emplace_back(keys);
+                    toReinsert.emplace_back(KeyChord{ keys.Modifiers(), newVkey, scanCode }, cmdID);
+                }
+            }
+        }
+
+        for (const auto& oldKeys : toRemove)
+        {
+            _KeyMap.erase(oldKeys);
+        }
+
+        for (auto& [newKeys, cmdID] : toReinsert)
+        {
+            _KeyMap.insert_or_assign(std::move(newKeys), std::move(cmdID));
+        }
+
+        for (const auto& parent : _parents)
+        {
+            // Invalidate parent caches so they rebuild on next direct access.
+            parent->_NameMapCache = nullptr;
+            parent->_ResolvedKeyToActionMapCache = nullptr;
+            parent->_GlobalHotkeysCache = nullptr;
+            parent->_AllCommandsCache = nullptr;
+            parent->_ResolveScancodeBindings(layout);
+        }
+    }
+
     com_ptr<ActionMap> ActionMap::Copy() const
     {
         auto actionMap{ make_self<ActionMap>() };
